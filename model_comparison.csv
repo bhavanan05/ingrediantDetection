@@ -1,0 +1,3 @@
+Model,Accuracy_Percent,Weighted_Precision_Percent,Weighted_Recall_Percent,Weighted_F1_Percent,Training_Rows,Test_Rows
+Random Forest,99.48,99.49,99.48,99.48,99652,24913
+SVM,99.73,99.73,99.73,99.73,99652,24913
