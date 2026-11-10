@@ -7,183 +7,137 @@ import numpy as np
 import re
 import os
 import html
-import textwrap
+import logging
+import contextlib
+import io
+
 from PIL import Image
+from io import BytesIO
+from datetime import datetime
 
-# ==================================================
-# PAGE CONFIGURATION
-# ==================================================
-
-st.set_page_config(
-    page_title="ML-Based Animal-Derived Ingredient Detection",
-    page_icon="🌿",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.lib.enums import TA_CENTER
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 )
 
-# ==================================================
-# HTML RENDERING HELPER
-# ==================================================
 
-def render_html(content):
-    st.markdown(
-        textwrap.dedent(content).strip(),
-        unsafe_allow_html=True
-    )
+# =====================================================
+# PAGE CONFIGURATION
+# =====================================================
+
+st.set_page_config(
+    page_title="Animal-Derived Ingredient Detection",
+    page_icon="🌿",
+    layout="wide"
+)
+
+logging.getLogger("easyocr").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
 
 
-# ==================================================
-# PROFESSIONAL CSS
-# ==================================================
+# =====================================================
+# CUSTOM CSS
+# =====================================================
 
 st.markdown("""
 <style>
 .stApp {
-    background-color: #FFFFFF;
-    color: #111827;
-}
-
-html, body, [class*="css"] {
-    color: #111827;
-    font-family: Arial, sans-serif;
-}
-
-h1, h2, h3, h4, p, label {
-    color: #111827 !important;
+    background-color: #ffffff;
+    color: #202020;
 }
 
 [data-testid="stSidebar"] {
-    background-color: #F4F7F5;
+    background-color: #f0f7f1;
 }
 
-[data-testid="stSidebar"] * {
-    color: #111827 !important;
+h1, h2, h3, h4 {
+    color: #174d35 !important;
 }
 
-/* HERO */
-
-.hero {
-    background: linear-gradient(120deg, #F0F7F1, #FFFFFF);
-    border: 1px solid #DCE9DE;
-    border-radius: 18px;
-    padding: 30px;
-    margin-bottom: 24px;
+p, label {
+    color: #202020;
 }
 
-.hero h1 {
-    color: #173D2B !important;
-    font-size: 36px;
+.stButton > button,
+.stDownloadButton > button {
+    background-color: #237a50;
+    color: white !important;
+    border-radius: 8px;
+    border: none;
+    padding: 10px 22px;
+    font-weight: bold;
 }
 
-.hero p {
-    color: #475569 !important;
-    font-size: 16px;
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    background-color: #185c3a;
+    color: white !important;
 }
 
-/* FEATURE CARDS */
-
-.section-card {
-    background-color: #FFFFFF;
-    border: 1px solid #E2E8F0;
-    border-radius: 14px;
-    padding: 20px;
-    margin-bottom: 18px;
-    min-height: 145px;
+textarea {
+    color: #202020 !important;
+    background-color: #ffffff !important;
 }
 
-/* INGREDIENT CARDS */
-
-.ingredient-card {
-    background: #FFFFFF;
-    border: 1px solid #E2E8F0;
-    border-left: 5px solid #2E7D50;
+div[data-testid="stMetric"] {
+    background-color: #f3faf4;
+    padding: 12px;
     border-radius: 10px;
-    padding: 15px;
-    margin: 10px 0;
-}
-
-.ingredient-card h4 {
-    color: #173D2B !important;
-}
-
-.ingredient-card p {
-    color: #374151 !important;
-}
-
-/* EXTRACTED TEXT AREA */
-
-.stTextArea textarea {
-    color: #FFFFFF !important;
-    -webkit-text-fill-color: #FFFFFF !important;
-    background-color: #262730 !important;
-    caret-color: #FFFFFF !important;
-    border: 1px solid #555555 !important;
-    border-radius: 10px !important;
-}
-
-.stTextArea textarea::placeholder {
-    color: #C0C0C0 !important;
-    -webkit-text-fill-color: #C0C0C0 !important;
-}
-
-.stTextArea textarea:focus {
-    border: 1px solid #2EAD72 !important;
-    box-shadow: 0 0 0 1px #2EAD72 !important;
-}
-
-/* BUTTONS */
-
-div.stButton > button {
-    background-color: #216E45;
-    color: white !important;
-    border-radius: 8px;
-    border: none;
-    padding: 10px 20px;
-    font-weight: bold;
-}
-
-div.stButton > button:hover {
-    background-color: #174D30;
-    color: white !important;
-}
-
-div.stDownloadButton > button {
-    background-color: #216E45;
-    color: white !important;
-    border-radius: 8px;
-    border: none;
-    font-weight: bold;
-}
-
-/* FOOTER */
-
-.footer {
-    text-align: center;
-    color: #64748B;
-    padding: 20px;
-    border-top: 1px solid #E2E8F0;
-    margin-top: 30px;
+    border: 1px solid #d8eadb;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==================================================
-# LOAD INGREDIENT REFERENCE DATA
-# ==================================================
+# =====================================================
+# TEXT NORMALIZATION
+# =====================================================
 
-@st.cache_data
+def normalize_text(text):
+    text = str(text).lower()
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def get_category_name(category):
+    category = normalize_text(category)
+
+    if (
+        "animal" in category
+        or "non vegan" in category
+        or "nonvegan" in category
+    ):
+        return "Animal-Based"
+
+    if "plant" in category or "vegan" in category:
+        return "Plant-Based"
+
+    return "Uncertain"
+
+
+# =====================================================
+# LOAD DATASETS SILENTLY
+# =====================================================
+
+@st.cache_data(show_spinner=False)
 def load_ingredient_data():
 
-    possible_files = [
+    files = [
         "ingredients.csv",
         "datasetsssssfinal.csv",
         "datasets2.csv"
     ]
 
-    for filename in possible_files:
+    dataframes = []
 
-        if not os.path.isfile(filename):
+    for filename in files:
+
+        if not os.path.exists(filename):
             continue
 
         try:
@@ -206,325 +160,420 @@ def load_ingredient_data():
             ]
 
             ingredient_col = next(
-                (
-                    col for col in df.columns
-                    if "ingredient" in col
-                ),
+                (c for c in df.columns if "ingredient" in c),
                 None
             )
 
             category_col = next(
                 (
-                    col for col in df.columns
-                    if "category" in col
-                    or "classification" in col
+                    c for c in df.columns
+                    if c in ["category", "classification", "label"]
                 ),
                 None
             )
 
             explanation_col = next(
                 (
-                    col for col in df.columns
-                    if "explanation" in col
-                    or "reason" in col
-                    or "source" in col
+                    c for c in df.columns
+                    if (
+                        "explanation" in c
+                        or "description" in c
+                        or "reason" in c
+                    )
                 ),
                 None
             )
 
-            if ingredient_col is None and len(df.columns) >= 1:
-                ingredient_col = df.columns[0]
+            if ingredient_col and category_col:
 
-            if category_col is None and len(df.columns) >= 2:
-                category_col = df.columns[1]
+                temp = pd.DataFrame()
 
-            if not ingredient_col or not category_col:
-                continue
+                temp["ingredient"] = df[ingredient_col]
+                temp["category"] = df[category_col]
 
-            selected = pd.DataFrame()
+                if explanation_col:
+                    temp["explanation"] = df[explanation_col]
+                else:
+                    temp["explanation"] = ""
 
-            selected["ingredient"] = (
-                df[ingredient_col]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-            selected["category"] = (
-                df[category_col]
-                .fillna("Uncertain")
-                .astype(str)
-                .str.strip()
-            )
-
-            if explanation_col:
-                selected["explanation"] = (
-                    df[explanation_col]
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
+                temp = temp.dropna(
+                    subset=["ingredient", "category"]
                 )
-            else:
-                selected["explanation"] = ""
 
-            selected = selected[
-                selected["ingredient"] != ""
-            ]
+                temp["ingredient"] = (
+                    temp["ingredient"].astype(str).str.strip()
+                )
 
-            selected = selected.drop_duplicates(
-                subset=["ingredient"],
-                keep="first"
-            )
+                temp["category"] = (
+                    temp["category"].astype(str).str.strip()
+                )
 
-            if not selected.empty:
-                return selected
+                temp["explanation"] = (
+                    temp["explanation"].fillna("").astype(str)
+                )
+
+                temp = temp[
+                    (temp["ingredient"] != "")
+                    & (temp["category"] != "")
+                ]
+
+                dataframes.append(temp)
 
         except Exception:
             continue
 
-    return pd.DataFrame(
-        columns=["ingredient", "category", "explanation"]
+    if not dataframes:
+        return pd.DataFrame(
+            columns=["ingredient", "category", "explanation"]
+        )
+
+    final_df = pd.concat(
+        dataframes,
+        ignore_index=True
     )
 
+    final_df["_normalized"] = (
+        final_df["ingredient"].map(normalize_text)
+    )
 
-# ==================================================
-# NORMALIZE TEXT
-# ==================================================
+    final_df = final_df.drop_duplicates(
+        subset=["_normalized"],
+        keep="first"
+    )
 
-def normalize_text(text):
-
-    text = str(text).lower().strip()
-    text = re.sub(r"[^a-z0-9\s-]", " ", text)
-    text = re.sub(r"\s+", " ", text)
-
-    return text
+    return final_df.drop(
+        columns=["_normalized"]
+    ).reset_index(drop=True)
 
 
-# ==================================================
-# LOAD TRAINED SVM MODEL
-# ==================================================
+# =====================================================
+# BUILT-IN INGREDIENT INFORMATION
+# =====================================================
 
-@st.cache_resource
-def load_trained_model():
+BUILT_IN_INGREDIENTS = {
 
-    model_path = os.path.join("models", "svm.pkl")
+    "gelatin": (
+        "Animal-Based",
+        "Gelatin is commonly obtained from animal collagen."
+    ),
 
-    if not os.path.isfile(model_path):
+    "collagen": (
+        "Animal-Based",
+        "Collagen is commonly sourced from animal tissues."
+    ),
+
+    "lanolin": (
+        "Animal-Based",
+        "Lanolin is obtained from sheep wool."
+    ),
+
+    "beeswax": (
+        "Animal-Based",
+        "Beeswax is produced by honeybees."
+    ),
+
+    "carmine": (
+        "Animal-Based",
+        "Carmine is a red pigment obtained from insects."
+    ),
+
+    "tallow": (
+        "Animal-Based",
+        "Tallow is rendered animal fat."
+    ),
+
+    "keratin": (
+        "Animal-Based",
+        "Keratin may be sourced from animal materials."
+    ),
+
+    "honey": (
+        "Animal-Based",
+        "Honey is produced by honeybees."
+    ),
+
+    "casein": (
+        "Animal-Based",
+        "Casein is a milk-derived protein."
+    ),
+
+    "shellac": (
+        "Animal-Based",
+        "Shellac is obtained from lac insects."
+    ),
+
+    "silk": (
+        "Animal-Based",
+        "Silk is produced by silkworms."
+    ),
+
+    "milk": (
+        "Animal-Based",
+        "Milk is an animal-derived ingredient."
+    ),
+
+    "aloe vera": (
+        "Plant-Based",
+        "Aloe vera is obtained from a plant."
+    ),
+
+    "coconut oil": (
+        "Plant-Based",
+        "Coconut oil is extracted from coconuts."
+    ),
+
+    "olive oil": (
+        "Plant-Based",
+        "Olive oil is extracted from olives."
+    ),
+
+    "shea butter": (
+        "Plant-Based",
+        "Shea butter is obtained from shea tree nuts."
+    ),
+
+    "sunflower oil": (
+        "Plant-Based",
+        "Sunflower oil is extracted from sunflower seeds."
+    ),
+
+    "soybean oil": (
+        "Plant-Based",
+        "Soybean oil is obtained from soybeans."
+    ),
+
+    "almond oil": (
+        "Plant-Based",
+        "Almond oil is obtained from almonds."
+    ),
+
+    "tea tree oil": (
+        "Plant-Based",
+        "Tea tree oil is extracted from tea tree leaves."
+    ),
+
+    "jojoba oil": (
+        "Plant-Based",
+        "Jojoba oil is obtained from jojoba seeds."
+    ),
+
+    "argan oil": (
+        "Plant-Based",
+        "Argan oil is obtained from argan tree kernels."
+    )
+}
+
+
+# =====================================================
+# LOAD MACHINE LEARNING MODELS
+# =====================================================
+
+def load_pickle_file(paths):
+
+    for path in paths:
+
+        if os.path.exists(path):
+
+            try:
+                return joblib.load(path)
+
+            except Exception:
+                continue
+
+    return None
+
+
+@st.cache_resource(show_spinner=False)
+def load_ml_models():
+
+    rf_model = load_pickle_file([
+        "models/random_forest.pkl",
+        "random_forest_classifier.pkl",
+        "models/random_forest_classifier.pkl"
+    ])
+
+    svm_model = load_pickle_file([
+        "models/svm.pkl",
+        "svm.pkl"
+    ])
+
+    vectorizer = load_pickle_file([
+        "models/tfidf_vectorizer.pkl",
+        "models/vectorizer.pkl",
+        "tfidf_vectorizer.pkl",
+        "vectorizer.pkl"
+    ])
+
+    return rf_model, svm_model, vectorizer
+
+
+# =====================================================
+# MODEL PREDICTION
+# =====================================================
+
+def predict_model(model, vectorizer, ingredient):
+
+    if model is None:
         return None
-
-    return joblib.load(model_path)
-
-
-# ==================================================
-# INGREDIENT CLASSIFICATION
-# ==================================================
-
-def classify_ingredient(ingredient, reference_data):
-
-    ingredient = ingredient.strip()
-    normalized_ingredient = normalize_text(ingredient)
-
-    if not normalized_ingredient:
-        return {
-            "Ingredient": ingredient,
-            "Classification": "Uncertain",
-            "Explanation": "No ingredient text was provided."
-        }
-
-    fallback = {
-        "gelatin": (
-            "Animal-Based",
-            "Gelatin is generally derived from animal collagen."
-        ),
-        "collagen": (
-            "Animal-Based",
-            "Collagen commonly comes from animal connective tissue."
-        ),
-        "lanolin": (
-            "Animal-Based",
-            "Lanolin is obtained from sheep's wool."
-        ),
-        "beeswax": (
-            "Animal-Based",
-            "Beeswax is produced by honeybees."
-        ),
-        "carmine": (
-            "Animal-Based",
-            "Carmine is a red pigment derived from cochineal insects."
-        ),
-        "tallow": (
-            "Animal-Based",
-            "Tallow is rendered animal fat."
-        ),
-        "keratin": (
-            "Animal-Based",
-            "Cosmetic keratin is commonly sourced from animal materials."
-        ),
-        "honey": (
-            "Animal-Based",
-            "Honey is produced by bees."
-        ),
-        "milk": (
-            "Animal-Based",
-            "Milk is an animal-derived ingredient."
-        ),
-        "aloe vera": (
-            "Plant-Based",
-            "Aloe vera is a plant-derived ingredient."
-        ),
-        "coconut oil": (
-            "Plant-Based",
-            "Coconut oil is obtained from coconuts."
-        ),
-        "olive oil": (
-            "Plant-Based",
-            "Olive oil is obtained from olives."
-        ),
-        "shea butter": (
-            "Plant-Based",
-            "Shea butter is derived from shea tree nuts."
-        ),
-        "glycerin": (
-            "Uncertain",
-            "Glycerin may come from plant, animal, or synthetic sources."
-        ),
-        "glycerol": (
-            "Uncertain",
-            "Glycerol may come from plant, animal, or synthetic sources."
-        ),
-        "squalene": (
-            "Uncertain",
-            "Squalene can come from animal, plant, or other sources."
-        ),
-        "stearic acid": (
-            "Uncertain",
-            "Stearic acid may be derived from animal or plant fats."
-        ),
-        "cetyl alcohol": (
-            "Uncertain",
-            "The source can vary depending on the manufacturer."
-        )
-    }
-
-    # CHECK BUILT-IN INGREDIENTS
-
-    if normalized_ingredient in fallback:
-
-        result = fallback[normalized_ingredient]
-
-        return {
-            "Ingredient": ingredient,
-            "Classification": result[0],
-            "Explanation": result[1]
-        }
-
-    # CHECK REFERENCE DATA
-
-    if not reference_data.empty:
-
-        reference = reference_data.copy()
-
-        reference["normalized"] = (
-            reference["ingredient"].apply(normalize_text)
-        )
-
-        exact = reference[
-            reference["normalized"] == normalized_ingredient
-        ]
-
-        if not exact.empty:
-
-            row = exact.iloc[0]
-
-            return {
-                "Ingredient": ingredient,
-                "Classification": str(row["category"]).strip(),
-                "Explanation": (
-                    str(row["explanation"]).strip()
-                    or "Classification retrieved from the ingredient reference."
-                )
-            }
-
-        matches = reference[
-            reference["normalized"].apply(
-                lambda value:
-                    len(value) >= 4
-                    and (
-                        value in normalized_ingredient
-                        or normalized_ingredient in value
-                    )
-            )
-        ]
-
-        if len(matches) == 1:
-
-            row = matches.iloc[0]
-
-            return {
-                "Ingredient": ingredient,
-                "Classification": str(row["category"]).strip(),
-                "Explanation": (
-                    str(row["explanation"]).strip()
-                    or "A related ingredient was found in the reference."
-                )
-            }
-
-    # SVM PREDICTION
 
     try:
 
-        model = load_trained_model()
+        if hasattr(model, "steps"):
+            model_input = [ingredient]
 
-        if model is not None:
+        else:
 
-            prediction = str(
-                model.predict([ingredient])[0]
+            if vectorizer is None:
+                return None
+
+            model_input = vectorizer.transform([
+                normalize_text(ingredient)
+            ])
+
+        prediction = model.predict(model_input)[0]
+
+        return get_category_name(prediction)
+
+    except Exception:
+        return None
+
+
+# =====================================================
+# INGREDIENT CLASSIFICATION
+# =====================================================
+
+def classify_ingredient(ingredient, reference_data):
+
+    normalized = normalize_text(ingredient)
+
+    if normalized in BUILT_IN_INGREDIENTS:
+
+        category, explanation = (
+            BUILT_IN_INGREDIENTS[normalized]
+        )
+
+        return {
+            "Ingredient": ingredient,
+            "Category": category,
+            "Explanation": explanation
+        }
+
+    if not reference_data.empty:
+
+        matches = reference_data[
+            reference_data["ingredient"].map(normalize_text)
+            == normalized
+        ]
+
+        if not matches.empty:
+
+            row = matches.iloc[0]
+
+            explanation = str(
+                row.get("explanation", "")
             ).strip()
 
-            allowed_categories = {
-                "Animal-Based",
-                "Plant-Based",
-                "Uncertain"
+            if not explanation or explanation.lower() == "nan":
+                explanation = (
+                    "Identified using available ingredient "
+                    "reference information."
+                )
+
+            return {
+                "Ingredient": ingredient,
+                "Category": get_category_name(row["category"]),
+                "Explanation": explanation
             }
 
-            if prediction in allowed_categories:
+    rf_model, svm_model, vectorizer = load_ml_models()
 
-                return {
-                    "Ingredient": ingredient,
-                    "Classification": prediction,
-                    "Explanation": (
-                        "Predicted by the trained SVM machine-learning model. "
-                        "This is an estimate and may not reflect the supplier's actual source."
-                    )
-                }
+    rf_prediction = predict_model(
+        rf_model,
+        vectorizer,
+        ingredient
+    )
 
-    except Exception as error:
-        print("Model prediction error:", error)
+    svm_prediction = predict_model(
+        svm_model,
+        vectorizer,
+        ingredient
+    )
 
-    return {
-        "Ingredient": ingredient,
-        "Classification": "Uncertain",
-        "Explanation": (
-            "The ingredient could not be confidently identified. "
-            "Check the manufacturer's ingredient source."
+    if (
+        rf_prediction is not None
+        and svm_prediction is not None
+    ):
+
+        if rf_prediction == svm_prediction:
+            final_category = rf_prediction
+        else:
+            final_category = "Uncertain"
+
+    elif rf_prediction is not None:
+
+        final_category = rf_prediction
+
+    elif svm_prediction is not None:
+
+        final_category = svm_prediction
+
+    else:
+
+        final_category = "Uncertain"
+
+    explanations = {
+
+        "Animal-Based": (
+            "The available classification information indicates "
+            "an animal-derived origin. Verify with the manufacturer."
+        ),
+
+        "Plant-Based": (
+            "The available classification information indicates "
+            "a plant-derived origin."
+        ),
+
+        "Uncertain": (
+            "The ingredient source could not be confidently "
+            "identified. It may vary by supplier."
         )
     }
 
+    return {
+        "Ingredient": ingredient,
+        "Category": final_category,
+        "Explanation": explanations[final_category]
+    }
 
-# ==================================================
-# EASY OCR
-# ==================================================
 
-@st.cache_resource
+# =====================================================
+# OCR READER
+# =====================================================
+
+@st.cache_resource(show_spinner=False)
 def load_ocr_reader():
 
-    return easyocr.Reader(
-        ["en"],
-        gpu=False
-    )
+    output_buffer = io.StringIO()
+    error_buffer = io.StringIO()
+
+    with contextlib.redirect_stdout(output_buffer):
+
+        with contextlib.redirect_stderr(error_buffer):
+
+            reader = easyocr.Reader(
+                ["en"],
+                gpu=False,
+                verbose=False
+            )
+
+    return reader
 
 
-def extract_text(image):
+# =====================================================
+# EXTRACT TEXT FROM IMAGE
+# =====================================================
+
+def extract_text_from_image(image):
 
     reader = load_ocr_reader()
 
@@ -537,227 +586,572 @@ def extract_text(image):
         cv2.COLOR_RGB2BGR
     )
 
-    results = reader.readtext(
+    extracted_text = reader.readtext(
         image_array,
         detail=0,
         paragraph=True
     )
 
-    return "\n".join(results)
+    return "\n".join(extracted_text)
 
 
-# ==================================================
+# =====================================================
 # SPLIT INGREDIENTS
-# ==================================================
+# =====================================================
 
 def split_ingredients(text):
 
-    text = text.replace("\n", ",")
+    text = str(text).replace("\n", ",")
 
-    parts = re.split(r"[,;]+", text)
-
-    ingredients = []
-
-    for part in parts:
-
-        part = part.strip()
-
-        part = re.sub(
-            r"^(ingredients?|composition)\s*:\s*",
-            "",
-            part,
-            flags=re.IGNORECASE
-        )
-
-        part = part.strip(" .:-")
-
-        if len(part) >= 2:
-            ingredients.append(part)
-
-    final_ingredients = []
-    seen = set()
-
-    for ingredient in ingredients:
-
-        key = normalize_text(ingredient)
-
-        if key not in seen:
-            final_ingredients.append(ingredient)
-            seen.add(key)
-
-    return final_ingredients
-
-
-# ==================================================
-# HEADER
-# ==================================================
-
-render_html("""
-<div class="hero">
-    <h1>🌿 ML-Based Animal-Derived Ingredient Detection</h1>
-    <p>
-        Discover the possible origin of ingredients in your
-        personal care products using Optical Character Recognition
-        and Machine Learning.
-    </p>
-</div>
-""")
-
-
-# ==================================================
-# SIDEBAR
-# ==================================================
-
-with st.sidebar:
-
-    st.markdown("## 🌿 Ingredient Detector")
-
-    page = st.radio(
-        "Navigation",
-        ["Home", "Ingredient Scanner", "About"]
+    text = re.sub(
+        r"(?i)ingredients\s*:",
+        "",
+        text
     )
 
-    st.markdown("---")
+    text = re.sub(
+        r"(?i)composition\s*:",
+        "",
+        text
+    )
 
-    st.markdown("### How it works")
+    parts = re.split(
+        r"[,;]+",
+        text
+    )
 
-    st.write("1. Upload a product label or take a photo.")
-    st.write("2. Extract ingredient text using OCR.")
-    st.write("3. Review and edit the extracted text.")
-    st.write("4. Analyze the ingredients.")
-    st.write("5. Download the report.")
+    cleaned = []
+    seen = set()
+
+    for ingredient in parts:
+
+        ingredient = ingredient.strip()
+
+        ingredient = re.sub(
+            r"^[\d\s.\-*•]+",
+            "",
+            ingredient
+        )
+
+        ingredient = re.sub(
+            r"[.\s]+$",
+            "",
+            ingredient
+        )
+
+        if not ingredient:
+            continue
+
+        normalized = normalize_text(ingredient)
+
+        if normalized and normalized not in seen:
+
+            seen.add(normalized)
+            cleaned.append(ingredient)
+
+    return cleaned
 
 
-# ==================================================
+# =====================================================
+# PDF REPORT GENERATION
+# =====================================================
+
+def generate_pdf_report(results):
+
+    if not results:
+        raise ValueError("No analysis results available.")
+
+    buffer = BytesIO()
+
+    page_width, _ = A4
+
+    left_margin = 12 * mm
+    right_margin = 12 * mm
+
+    available_width = (
+        page_width - left_margin - right_margin
+    )
+
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=right_margin,
+        leftMargin=left_margin,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title="Ingredient Analysis Report",
+        author="Animal-Derived Ingredient Detection"
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#174d35"),
+        spaceAfter=8
+    )
+
+    heading_style = ParagraphStyle(
+        "ReportHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor("#237a50"),
+        spaceBefore=12,
+        spaceAfter=7
+    )
+
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=11,
+        wordWrap="CJK"
+    )
+
+    header_style = ParagraphStyle(
+        "ReportTableHeader",
+        parent=body_style,
+        fontName="Helvetica-Bold",
+        textColor=colors.white,
+        alignment=TA_CENTER
+    )
+
+    def safe_paragraph(value, style=body_style):
+
+        safe = html.escape(
+            str(value if value is not None else "")
+        )
+
+        safe = safe.replace("\n", "<br/>")
+
+        return Paragraph(safe, style)
+
+    total = len(results)
+
+    animal = sum(
+        item.get("Category") == "Animal-Based"
+        for item in results
+    )
+
+    plant = sum(
+        item.get("Category") == "Plant-Based"
+        for item in results
+    )
+
+    uncertain = total - animal - plant
+
+    elements = [
+
+        Paragraph(
+            "Ingredient Analysis Report",
+            title_style
+        ),
+
+        safe_paragraph(
+            "Generated: "
+            + datetime.now().strftime("%d-%m-%Y %I:%M %p")
+        ),
+
+        Spacer(1, 8),
+
+        Paragraph(
+            "Analysis Summary",
+            heading_style
+        )
+    ]
+
+    summary_data = [
+
+        [
+            "Total Ingredients",
+            "Animal-Based",
+            "Plant-Based",
+            "Uncertain"
+        ],
+
+        [
+            str(total),
+            str(animal),
+            str(plant),
+            str(uncertain)
+        ]
+    ]
+
+    summary_table = Table(
+        summary_data,
+        colWidths=[available_width / 4] * 4,
+        repeatRows=1
+    )
+
+    summary_table.setStyle(
+        TableStyle([
+
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, 0),
+                colors.HexColor("#237a50")
+            ),
+
+            (
+                "TEXTCOLOR",
+                (0, 0),
+                (-1, 0),
+                colors.white
+            ),
+
+            (
+                "BACKGROUND",
+                (0, 1),
+                (-1, -1),
+                colors.HexColor("#f0f7f1")
+            ),
+
+            (
+                "ALIGN",
+                (0, 0),
+                (-1, -1),
+                "CENTER"
+            ),
+
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.5,
+                colors.grey
+            ),
+
+            (
+                "PADDING",
+                (0, 0),
+                (-1, -1),
+                7
+            )
+        ])
+    )
+
+    elements.extend([
+        summary_table,
+        Paragraph(
+            "Ingredient Classification Details",
+            heading_style
+        )
+    ])
+
+    table_data = [[
+
+        safe_paragraph(
+            "Ingredient",
+            header_style
+        ),
+
+        safe_paragraph(
+            "Classification",
+            header_style
+        ),
+
+        safe_paragraph(
+            "Explanation",
+            header_style
+        )
+
+    ]]
+
+    for item in results:
+
+        table_data.append([
+
+            safe_paragraph(
+                item.get("Ingredient", "")
+            ),
+
+            safe_paragraph(
+                item.get("Category", "Uncertain")
+            ),
+
+            safe_paragraph(
+                item.get("Explanation", "")
+            )
+
+        ])
+
+    result_table = Table(
+        table_data,
+        colWidths=[
+            available_width * 0.25,
+            available_width * 0.22,
+            available_width * 0.53
+        ],
+        repeatRows=1,
+        hAlign="LEFT"
+    )
+
+    result_table.setStyle(
+        TableStyle([
+
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, 0),
+                colors.HexColor("#237a50")
+            ),
+
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.45,
+                colors.HexColor("#b7c8bc")
+            ),
+
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "TOP"
+            ),
+
+            (
+                "ROWBACKGROUNDS",
+                (0, 1),
+                (-1, -1),
+                [
+                    colors.white,
+                    colors.HexColor("#f3faf4")
+                ]
+            ),
+
+            (
+                "LEFTPADDING",
+                (0, 0),
+                (-1, -1),
+                6
+            ),
+
+            (
+                "RIGHTPADDING",
+                (0, 0),
+                (-1, -1),
+                6
+            ),
+
+            (
+                "TOPPADDING",
+                (0, 0),
+                (-1, -1),
+                6
+            ),
+
+            (
+                "BOTTOMPADDING",
+                (0, 0),
+                (-1, -1),
+                6
+            )
+        ])
+    )
+
+    elements.extend([
+
+        result_table,
+
+        Paragraph(
+            "Important Note",
+            heading_style
+        ),
+
+        safe_paragraph(
+            "This report provides automated ingredient "
+            "classification for informational purposes. "
+            "Some ingredients may have different sources "
+            "depending on their manufacturing process or supplier. "
+            "Uncertain results require further verification "
+            "with the product manufacturer."
+        )
+    ])
+
+    document.build(elements)
+
+    pdf_bytes = buffer.getvalue()
+
+    buffer.close()
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Invalid PDF file generated.")
+
+    return pdf_bytes
+
+
+# =====================================================
+# APPLICATION HEADER
+# =====================================================
+
+st.markdown("""
+<h1 style="text-align:center;">
+🌿 Animal-Derived Ingredient Detection
+</h1>
+
+<p style="text-align:center; font-size:16px;">
+Identify animal-derived ingredients in everyday products
+</p>
+
+<hr>
+""", unsafe_allow_html=True)
+
+
+# =====================================================
+# SIDEBAR
+# =====================================================
+
+st.sidebar.title("🌿 Navigation")
+
+page = st.sidebar.radio(
+    "Select a Page",
+    [
+        "Home",
+        "Ingredient Scanner",
+        "About"
+    ]
+)
+
+
+# =====================================================
 # HOME PAGE
-# ==================================================
+# =====================================================
 
 if page == "Home":
 
-    st.subheader("Welcome to Ingredient Detection")
+    st.markdown("""
+    ## Welcome!
 
-    st.write(
-        "Understand whether ingredients may be animal-derived "
-        "or plant-derived before choosing a product."
-    )
+    Identify animal-derived ingredients in everyday
+    personal-care products.
 
-    col1, col2, col3 = st.columns(3)
+    ### What can this application do?
 
-    with col1:
-        render_html("""
-        <div class="section-card">
-            <h3>📷 Image Recognition</h3>
-            <p>Upload a label or capture one using your camera.</p>
-        </div>
-        """)
+    - Upload ingredient-label images.
+    - Capture labels using your camera.
+    - Enter ingredient text manually.
+    - Extract text from product labels.
+    - View ingredient classifications.
+    - Read ingredient explanations.
+    - Download a PDF analysis report.
+    """)
 
-    with col2:
-        render_html("""
-        <div class="section-card">
-            <h3>🔎 Ingredient Analysis</h3>
-            <p>Extract text and identify possible ingredient origins.</p>
-        </div>
-        """)
-
-    with col3:
-        render_html("""
-        <div class="section-card">
-            <h3>📄 Analysis Report</h3>
-            <p>View your ingredient classification results.</p>
-        </div>
-        """)
-
-    st.info(
-        "Ingredient classifications are estimates. "
-        "The same ingredient may have different sources depending "
-        "on the manufacturer."
+    st.success(
+        "Start using the Ingredient Scanner from the sidebar."
     )
 
 
-# ==================================================
-# INGREDIENT SCANNER PAGE
-# ==================================================
+# =====================================================
+# INGREDIENT SCANNER
+# =====================================================
 
 elif page == "Ingredient Scanner":
 
-    st.subheader("Scan Your Product Label")
+    st.markdown("## 🔍 Ingredient Scanner")
 
     st.write(
-        "Upload a product-label image or capture one using your camera."
+        "Upload a product label, capture an image, "
+        "or manually enter ingredient information."
     )
 
-    upload_col, camera_col = st.columns(2)
+    input_method = st.radio(
+        "Choose how to provide ingredient information:",
+        [
+            "Upload Image",
+            "Capture Image",
+            "Enter Text Manually"
+        ],
+        horizontal=True,
+        key="input_method"
+    )
 
-    with upload_col:
+    uploaded_image = None
 
-        st.markdown("### 📁 Upload an Image")
+    # IMAGE UPLOAD
+
+    if input_method == "Upload Image":
 
         uploaded_file = st.file_uploader(
-            "Choose an image from your device",
+            "Upload Ingredient Label",
             type=["png", "jpg", "jpeg", "webp"],
-            key="label_upload"
+            key="ingredient_upload"
         )
 
-    with camera_col:
+        if uploaded_file is not None:
 
-        st.markdown("### 📸 Capture with Camera")
+            try:
+                uploaded_image = Image.open(
+                    uploaded_file
+                ).convert("RGB")
 
-        camera_file = st.camera_input(
-            "Take a photo of the ingredient label",
-            key="label_camera"
+            except Exception:
+                st.error("The selected image could not be opened.")
+
+    # CAMERA CAPTURE
+
+    elif input_method == "Capture Image":
+
+        camera_image = st.camera_input(
+            "Capture Ingredient Label",
+            key="ingredient_camera"
         )
 
-    image_file = None
+        if camera_image is not None:
 
-    if uploaded_file is not None and camera_file is not None:
+            try:
+                uploaded_image = Image.open(
+                    camera_image
+                ).convert("RGB")
 
-        source_choice = st.radio(
-            "Choose which image to analyze",
-            ["Uploaded image", "Camera image"],
-            horizontal=True,
-            key="image_source_choice"
-        )
-
-        image_file = (
-            uploaded_file
-            if source_choice == "Uploaded image"
-            else camera_file
-        )
-
-    elif uploaded_file is not None:
-        image_file = uploaded_file
-
-    elif camera_file is not None:
-        image_file = camera_file
+            except Exception:
+                st.error("The captured image could not be opened.")
 
     # IMAGE PREVIEW AND OCR
 
-    if image_file is not None:
+    if uploaded_image is not None:
 
-        try:
+        st.markdown("### 2. Image Preview")
 
-            image = Image.open(image_file).convert("RGB")
+        st.image(
+            uploaded_image,
+            caption="Ingredient Label Image",
+            use_container_width=True
+        )
 
-            st.image(
-                image,
-                caption="Selected product label",
-                use_container_width=True
-            )
+        if st.button(
+            "Extract Ingredient Text",
+            use_container_width=True,
+            key="extract_ocr"
+        ):
 
-            if st.button(
-                "🔍 Extract Ingredient Text",
-                key="extract_label_text"
-            ):
+            try:
 
-                with st.spinner(
-                    "Reading the label. This may take a moment..."
-                ):
+                with st.status(
+                    "Reading the label...",
+                    expanded=False
+                ) as status:
 
-                    extracted_text = extract_text(image)
+                    extracted_text = extract_text_from_image(
+                        uploaded_image
+                    )
+
+                    status.update(
+                        label="Text extraction complete.",
+                        state="complete"
+                    )
 
                 st.session_state["extracted_text"] = extracted_text
-
-                st.session_state["ingredient_text_editor"] = extracted_text
 
                 st.session_state.pop(
                     "analysis_results",
@@ -765,233 +1159,379 @@ elif page == "Ingredient Scanner":
                 )
 
                 if extracted_text.strip():
+
                     st.success(
-                        "Text extraction completed. Review the text below."
+                        "Ingredient text extracted successfully!"
                     )
+
                 else:
+
                     st.warning(
-                        "No readable text was found. Try a clearer image."
+                        "No text found. Try a clearer image."
                     )
 
-        except Exception as error:
+            except Exception as error:
 
-            st.error(
-                "The selected image could not be opened or processed."
-            )
+                st.error(
+                    "Unable to read the image. Please try another image."
+                )
 
-            st.caption(str(error))
+                st.caption(
+                    f"Technical detail: {error}"
+                )
 
-    # TEXT REVIEW
+    # MANUAL TEXT INPUT
 
-    st.markdown("### ✏️ Review Extracted Text")
+    if input_method == "Enter Text Manually":
 
-    st.caption(
-        "Check the OCR result and correct any mistakes before analyzing."
-    )
+        st.markdown("### 2. Enter Ingredient Information")
 
-    if "ingredient_text_editor" not in st.session_state:
-
-        st.session_state["ingredient_text_editor"] = (
-            st.session_state.get("extracted_text", "")
+        manual_text = st.text_area(
+            "Enter ingredients separated by commas",
+            placeholder=(
+                "Example: Water, Glycerin, Aloe Vera, "
+                "Collagen, Coconut Oil"
+            ),
+            height=150,
+            key="manual_ingredient_text"
         )
 
-    ingredient_text = st.text_area(
-        "Extracted ingredient text",
-        height=180,
-        placeholder="Extracted text from your label will appear here...",
-        key="ingredient_text_editor"
-    )
+        if manual_text.strip():
 
-    # ANALYZE INGREDIENTS
+            st.session_state["extracted_text"] = manual_text
 
-    if st.button(
-        "🧪 Analyze Ingredients",
-        key="analyze_ingredients"
+    # EXTRACTED TEXT
+
+    if (
+        "extracted_text" in st.session_state
+        and st.session_state["extracted_text"].strip()
     ):
 
-        ingredients = split_ingredients(ingredient_text)
+        st.markdown("### 3. Extracted Ingredient Text")
 
-        if not ingredients:
+        edited_text = st.text_area(
+            "Review or edit the extracted text",
+            value=st.session_state["extracted_text"],
+            height=150,
+            key="editable_ingredient_text"
+        )
 
-            st.warning(
-                "First upload or capture a label and extract its text."
+        st.markdown("### 4. Analyze Ingredients")
+
+        if st.button(
+            "🔍 Analyze Ingredients",
+            use_container_width=True,
+            key="run_analysis"
+        ):
+
+            ingredients = split_ingredients(
+                edited_text
             )
 
-        else:
+            if not ingredients:
 
-            reference_data = load_ingredient_data()
+                st.warning(
+                    "Please provide valid ingredient information."
+                )
 
-            results = []
+            else:
 
-            progress = st.progress(0)
+                results = []
 
-            for index, ingredient in enumerate(ingredients):
+                total_ingredients = len(ingredients)
 
-                results.append(
-                    classify_ingredient(
-                        ingredient,
-                        reference_data
+                # Load reference information once.
+                reference_data = load_ingredient_data()
+
+                # PROGRESS DISPLAY
+
+                progress_bar = st.progress(0)
+
+                progress_text = st.empty()
+
+                current_item = st.empty()
+
+                try:
+
+                    for index, ingredient in enumerate(
+                        ingredients,
+                        start=1
+                    ):
+
+                        percent_before = int(
+                            (index - 1) / total_ingredients * 100
+                        )
+
+                        progress_text.markdown(
+                            f"**Analysis progress: "
+                            f"{index - 1}/{total_ingredients} "
+                            f"ingredients ({percent_before}%)**"
+                        )
+
+                        current_item.caption(
+                            f"Currently analyzing: {ingredient}"
+                        )
+
+                        result = classify_ingredient(
+                            ingredient,
+                            reference_data
+                        )
+
+                        results.append(result)
+
+                        percent = int(
+                            index / total_ingredients * 100
+                        )
+
+                        progress_bar.progress(
+                            percent,
+                            text=f"Analyzing ingredients: {percent}%"
+                        )
+
+                        progress_text.markdown(
+                            f"**Analysis progress: "
+                            f"{index}/{total_ingredients} "
+                            f"ingredients ({percent}%)**"
+                        )
+
+                    st.session_state["analysis_results"] = results
+
+                    progress_text.success(
+                        f"Analysis completed: {total_ingredients} "
+                        f"of {total_ingredients} ingredients analyzed (100%)."
                     )
-                )
 
-                progress.progress(
-                    int(((index + 1) / len(ingredients)) * 100)
-                )
+                    current_item.empty()
 
-            progress.empty()
+                    st.success(
+                        "Ingredient analysis completed successfully!"
+                    )
 
-            st.session_state["analysis_results"] = results
+                except Exception as error:
 
-            st.success("Ingredient analysis completed!")
+                    progress_text.empty()
+                    current_item.empty()
 
-    # DISPLAY RESULTS
+                    st.error(
+                        "An error occurred during ingredient analysis."
+                    )
+
+                    st.caption(
+                        f"Technical detail: {error}"
+                    )
+
+    # =================================================
+    # CLASSIFICATION RESULTS
+    # =================================================
 
     if "analysis_results" in st.session_state:
 
         results = st.session_state["analysis_results"]
 
-        results_df = pd.DataFrame(results)
-
         st.markdown("---")
 
-        st.subheader("📊 Analysis Results")
+        st.markdown("## 5. Classification Results")
 
         animal_count = sum(
-            1 for item in results
-            if item["Classification"] == "Animal-Based"
+            item["Category"] == "Animal-Based"
+            for item in results
         )
 
         plant_count = sum(
-            1 for item in results
-            if item["Classification"] == "Plant-Based"
+            item["Category"] == "Plant-Based"
+            for item in results
         )
 
-        uncertain_count = (
-            len(results) - animal_count - plant_count
+        uncertain_count = sum(
+            item["Category"] == "Uncertain"
+            for item in results
         )
 
-        metric1, metric2, metric3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
 
-        metric1.metric("Animal-Based", animal_count)
-        metric2.metric("Plant-Based", plant_count)
-        metric3.metric("Uncertain", uncertain_count)
+        col1.metric(
+            "Total Ingredients",
+            len(results)
+        )
 
-        # INGREDIENT CARDS
+        col2.metric(
+            "Animal-Based",
+            animal_count
+        )
+
+        col3.metric(
+            "Plant-Based",
+            plant_count
+        )
+
+        col4.metric(
+            "Uncertain",
+            uncertain_count
+        )
+
+        # INDIVIDUAL RESULTS
+
+        st.markdown("### Individual Ingredient Results")
 
         for item in results:
 
-            category = str(
-                item.get("Classification", "Uncertain")
-            )
+            category = item["Category"]
 
-            category_lower = category.lower()
+            if category == "Animal-Based":
+                icon = "🔴"
 
-            if "animal" in category_lower:
-                color = "#B91C1C"
-                symbol = "🔴"
-
-            elif "plant" in category_lower:
-                color = "#15803D"
-                symbol = "🟢"
+            elif category == "Plant-Based":
+                icon = "🟢"
 
             else:
-                color = "#B45309"
-                symbol = "🟠"
+                icon = "🟡"
 
-            ingredient_name = html.escape(
-                str(item.get("Ingredient", ""))
-            )
+            with st.container(border=True):
 
-            explanation = html.escape(
-                str(item.get("Explanation", ""))
-            )
+                st.markdown(
+                    f"#### {icon} {html.escape(str(item['Ingredient']))}"
+                )
 
-            safe_category = html.escape(category)
+                st.markdown(
+                    f"**Classification:** {category}"
+                )
 
-            render_html(f"""
-            <div class="ingredient-card">
-                <h4>{symbol} {ingredient_name}</h4>
-                <p>
-                    <strong>Classification:</strong>
-                    <span style="color:{color};font-weight:bold;">
-                        {safe_category}
-                    </span>
-                </p>
-                <p>
-                    <strong>Explanation:</strong>
-                    {explanation}
-                </p>
-            </div>
-            """)
+                st.write(
+                    f"**Explanation:** {item['Explanation']}"
+                )
 
-        # DOWNLOAD REPORT
+        # COMPLETE TABLE
 
-        st.markdown("### 📥 Download Your Report")
+        st.markdown("### Complete Analysis Table")
 
-        csv_data = results_df.to_csv(
-            index=False
-        ).encode("utf-8-sig")
+        display_df = pd.DataFrame([
 
-        st.download_button(
-            label="Download CSV Report",
-            data=csv_data,
-            file_name="ingredient_analysis_report.csv",
-            mime="text/csv"
+            {
+                "Ingredient": item["Ingredient"],
+                "Classification": item["Category"],
+                "Explanation": item["Explanation"]
+            }
+
+            for item in results
+
+        ])
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
         )
 
-        st.caption(
-            "Results are estimates and may not confirm the actual "
-            "source used by a manufacturer."
+        # =================================================
+        # PDF DOWNLOAD
+        # =================================================
+
+        st.markdown("---")
+
+        st.markdown("## 📥 Download Your Report")
+
+        st.write(
+            "Download your ingredient analysis as a PDF document."
         )
 
+        try:
 
-# ==================================================
+            pdf_data = generate_pdf_report(results)
+
+            st.download_button(
+                label="📄 Download PDF Analysis Report",
+                data=pdf_data,
+                file_name="Ingredient_Analysis_Report.pdf",
+                mime="application/pdf",
+                key="download_pdf_report",
+                use_container_width=True
+            )
+
+        except Exception as error:
+
+            st.error(
+                "Unable to generate the PDF report."
+            )
+
+            st.caption(
+                f"Technical detail: {type(error).__name__}: {error}"
+            )
+
+        # CLEAR ANALYSIS
+
+        if st.button(
+            "Clear Analysis",
+            key="clear_analysis"
+        ):
+
+            for key in [
+                "analysis_results",
+                "extracted_text",
+                "editable_ingredient_text"
+            ]:
+
+                st.session_state.pop(
+                    key,
+                    None
+                )
+
+            st.rerun()
+
+
+# =====================================================
 # ABOUT PAGE
-# ==================================================
+# =====================================================
 
 elif page == "About":
 
-    st.subheader("About This Project")
+    st.markdown("## About")
 
     st.write("""
-    ML-Based Animal-Derived Ingredient Detection helps users
-    understand the possible origin of ingredients printed on
-    personal care product labels.
+    This application helps users identify ingredients
+    that may be derived from animals in everyday
+    personal-care products.
 
-    The application uses Optical Character Recognition (OCR)
-    to extract ingredient names from images.
+    Users can upload product-label images, capture
+    labels using a camera, or manually enter ingredient
+    information.
 
-    The extracted ingredients are normalized and compared
-    against ingredient reference information. A trained SVM
-    model is used to predict ingredients that are not found
-    in the reference information.
-
-    **Main technologies**
-
-    - Python
-    - Streamlit
-    - EasyOCR
-    - OpenCV
-    - Pandas
-    - Scikit-learn
-    - Machine Learning
+    The application extracts and analyzes ingredient
+    names and displays their classifications with
+    simple explanations.
     """)
 
+    st.markdown("### Classification Categories")
+
+    st.success(
+        "🟢 Plant-Based: Ingredients obtained from plants."
+    )
+
+    st.error(
+        "🔴 Animal-Based: Ingredients obtained from animals."
+    )
+
     st.warning(
-        "This tool is intended for informational purposes only. "
-        "It cannot guarantee an ingredient's actual source. "
-        "For confirmation, contact the product manufacturer."
+        "🟡 Uncertain: Ingredients whose source cannot "
+        "be confidently identified."
+    )
+
+    st.info(
+        "Some ingredients may have different sources "
+        "depending on the manufacturer or supplier."
     )
 
 
-# ==================================================
+# =====================================================
 # FOOTER
-# ==================================================
+# =====================================================
 
-render_html("""
-<div class="footer">
-    ML-Based Animal-Derived Ingredient Detection
-    <br>
-    Machine Learning | OCR | Ingredient Analysis
+st.markdown("""
+<div style="
+    text-align:center;
+    color:#777777;
+    font-size:13px;
+    padding:20px;
+">
+    🌿 Animal-Derived Ingredient Detection
 </div>
-""")
+""", unsafe_allow_html=True)
